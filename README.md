@@ -1,49 +1,49 @@
 # 🎬 AI Shorts Generator
 
-Génère automatiquement des vidéos **YouTube Shorts** grâce à la puissance de l’IA 🤖
+Generate vertical **YouTube Shorts / TikTok** videos locally: idea → script → voice-over → captioned 1080×1920 MP4.
 
-[![Node.js](https://img.shields.io/badge/Node.js->=20.0.0-brightgreen)](https://nodejs.org/)
-[![Render](https://img.shields.io/badge/Render-Deploy-blue)](https://render.com/)
+Runs **100% locally on Windows** with **no API keys required**:
+- **Script**: local generator (optional Groq if `GROQ_API_KEY` set)
+- **Voice**: Windows SAPI text-to-speech (offline)
+- **Video**: bundled `ffmpeg-static` (no system install needed)
 
----
+## Requirements
+- Node.js >= 20
+- Windows (for the offline SAPI voice). Optional: `GROQ_API_KEY` / `PLAYAI_API_KEY` for cloud quality.
 
-## 💡 Fonctionnalités
-- Génération automatique de vidéos YouTube Shorts
-- Choix de la **voix** (Homme/Femme, Français ou autres langues)
-- Durée ciblée configurable (20s à 70s)
-- **Logs centralisés** pour faciliter le debug
-- Compatible **Node.js 20+** et **Python 3.12**
-- Optimisé pour **Render** avec déploiement simple
-
----
-
-## 📝 Utilisation
-
-1. **Entrer l’idée de short**  
-   Exemple : *“La motivation à ne jamais abandonner.”*
-
-2. **Choisir la voix**  
-   Exemple : *Français (Homme)*
-
-3. **Définir la durée cible**  
-   Exemple : *20 secondes*
-
-4. **Générer le Short**  
-   L’IA crée la vidéo avec voix synthétique automatiquement.
-
----
-
-## ⚡ Déploiement sur Render
-
-1. Crée un projet sur Render et connecte ton **repo GitHub**
-2. Configure **Environment** :
-   - Build Command : `npm install`
-   - Start Command : `bash ./start-server.sh`
-3. Node.js >= 20.0.0 (Render utilise automatiquement la version définie dans `package.json`)
-4. Python 3.12 pour TTS
-5. Crée l’environnement Python TTS :
-
+## Run locally
 ```bash
-python3 -m venv tts-env
-source tts-env/bin/activate
-pip install -r requirements.txt
+npm install
+npm start
+```
+Open http://localhost:3000 — type an idea, pick a voice and duration, click **Générer**.
+The finished video plays in the page and is saved under `output/`.
+
+## Test the full pipeline (no server)
+```bash
+npm test
+```
+Generates a script, a WAV voice-over and an MP4, asserting each step.
+
+## API
+- `GET  /` — web UI
+- `POST /generate` — body `{ "idea": "...", "voice": "fr|fr-female|en|es", "duration": 20 }` → `{ "videoUrl": "/output/<id>.mp4", "script": "..." }`
+- `GET  /api/voices` — available voices
+- `GET  /api/health` — health check
+
+## Optional cloud upgrades (.env)
+Copy `.env.example` to `.env`:
+- `GROQ_API_KEY` — use Groq LLM for the script
+- `PLAYAI_API_KEY` — use PlayAI for the voice
+
+## Deploy (Render)
+`npm run render` runs `start-server.sh` (Linux). On Linux there is no SAPI, so set
+`PLAYAI_API_KEY` for TTS. Build: `npm install` · Start: `bash ./start-server.sh`.
+
+## Project layout
+- `index.js` — Express server + pipeline wiring
+- `groq.js` — script generation (local / Groq)
+- `tts.js` — text-to-speech (SAPI / PlayAI)
+- `video.js` — ffmpeg render (1080×1920, captions)
+- `public/index.html` — web UI
+- `test/smoke.js` — end-to-end test

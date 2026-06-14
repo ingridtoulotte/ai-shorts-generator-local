@@ -1,100 +1,98 @@
-/**
- * video.js — Ultimate AI Video Builder
- * ------------------------------------
- * Gère l’assemblage automatique des vidéos Shorts :
- * - Génère la piste audio (TTS)
- * - Crée le visuel (images, clips, transitions)
- * - Superpose texte, musique et effets
- * - Exporte en .mp4 prêt pour YouTube / TikTok
- *
- * Niveau pro : 100% modulaire, scalable, et stylé.
- */
+// ===============================================
+// video.js - AI Shorts Generator
+// Assemble a vertical short with ffmpeg-static (fully local)
+// ===============================================
 
 import fs from "fs";
 import path from "path";
-import { exec } from "child_process";
-import { fileURLToPath } from "url";
+import os from "os";
+import { execFile } from "child_process";
+import util from "util";
+import ffmpegStatic from "ffmpeg-static";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const execFileAsync = util.promisify(execFile);
+const FFMPEG = ffmpegStatic;
 
-// === 📍 CONFIG GLOBALE ===
-const OUTPUT_DIR = path.join(__dirname, "../outputs");
+const OUTPUT_DIR = path.join(process.cwd(), "output");
 if (!fs.existsSync(OUTPUT_DIR)) fs.mkdirSync(OUTPUT_DIR, { recursive: true });
 
-// === ⚙️ MAIN FUNCTION ===
-export async function createVideo({
-  audioPath,
-  subtitles = [],
-  images = [],
-  bgMusic = "",
-  resolution = "1080x1920",
-  outputName = `short-${Date.now()}.mp4`,
-}) {
-  const outputPath = path.join(OUTPUT_DIR, outputName);
+// Escape a filesystem path for use inside an ffmpeg filtergraph option.
+function escFilterPath(p) {
+  return p.replace(/\\/g, "/").replace(/:/g, "\\:");
+}
 
-  console.log("🎥 Création de la vidéo...");
-  if (!audioPath || !fs.existsSync(audioPath)) {
-    throw new Error("❌ Fichier audio introuvable !");
+// Pick a bold TTF available on the platform.
+function pickFont() {
+  const candidates = os.platform() === "win32"
+    ? ["C:/Windows/Fonts/arialbd.ttf", "C:/Windows/Fonts/arial.ttf", "C:/Windows/Fonts/segoeui.ttf"]
+    : ["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"];
+  for (const c of candidates) if (fs.existsSync(c)) return c;
+  return null;
+}
+
+// Word-wrap text to ~maxChars per line for big readable captions.
+function wrapText(text, maxChars = 22) {
+  const out = [];
+  for (const para of String(text).split(/\n+/)) {
+    let line = "";
+    for (const word of para.trim().split(/\s+/)) {
+      if (!word) continue;
+      if ((line + " " + word).trim().length > maxChars) {
+        if (line) out.push(line);
+        line = word;
+      } else {
+        line = (line + " " + word).trim();
+      }
+    }
+    if (line) out.push(line);
+  }
+  return out.join("\n");
+}
+
+/**
+ * createVideo - render a 1080x1920 mp4 from an audio track + caption text.
+ * @param {{audioPath:string, text?:string, outputName?:string}} opts
+ * @returns {Promise<string>} output mp4 path
+ */
+export async function createVideo({ audioPath, text = "", outputName } = {}) {
+  if (!audioPath || !fs.existsSync(audioPath)) throw new Error("Fichier audio introuvable: " + audioPath);
+
+  const name = outputName || `short-${Date.now()}.mp4`;
+  const outputPath = path.join(OUTPUT_DIR, name);
+  const font = pickFont();
+
+  // Caption text -> temp file (avoids filtergraph quoting hell).
+  const txtFile = path.join(OUTPUT_DIR, path.parse(name).name + ".caption.txt");
+  fs.writeFileSync(txtFile, wrapText(text), "utf8");
+
+  let drawtext = "";
+  if (font && String(text).trim()) {
+    drawtext =
+      `,drawtext=fontfile='${escFilterPath(font)}':textfile='${escFilterPath(txtFile)}'` +
+      `:fontcolor=white:fontsize=56:line_spacing=16:expansion=none` +
+      `:box=1:boxcolor=black@0.5:boxborderw=34` +
+      `:x=(w-text_w)/2:y=(h-text_h)/2`;
   }
 
-  // === 🖼️ Génération du script FFMPEG ===
-  const imageInputs = images
-    .map((img, i) => `-loop 1 -t 3 -i "${img}"`)
-    .join(" ");
-
-  const filters = [
-    "[0:a]apad=pad_dur=10[aud]",
-    "fps=30,format=yuv420p,scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920",
+  const args = [
+    "-y",
+    "-f", "lavfi", "-i", "color=c=0x0f1226:s=1080x1920:r=30",
+    "-i", audioPath,
+    "-filter_complex", `[0:v]format=yuv420p${drawtext}[v]`,
+    "-map", "[v]", "-map", "1:a",
+    "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "veryfast", "-b:v", "4M",
+    "-c:a", "aac", "-b:a", "192k",
+    "-shortest",
+    outputPath,
   ];
 
-  // === 🎶 Musique de fond ===
-  let bgMusicInput = "";
-  if (bgMusic && fs.existsSync(bgMusic)) {
-    bgMusicInput = `-i "${bgMusic}" -filter_complex "[1:a][0:a]amix=inputs=2:duration=first:dropout_transition=3[a]"`;
-  }
+  console.log("Rendu ffmpeg ->", outputPath);
+  await execFileAsync(FFMPEG, args, { windowsHide: true, maxBuffer: 1024 * 1024 * 64 });
 
-  // === 📝 Sous-titres stylés ===
-  const subtitlesFilter = subtitles.length
-    ? subtitles
-        .map(
-          (s, i) =>
-            `drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:text='${s.text.replace(
-              /'/g,
-              "\\'"
-            )}':x=(w-text_w)/2:y=h-200:fontsize=60:fontcolor=white:box=1:boxcolor=black@0.6:enable='between(t,${s.start},${
-              s.end
-            })'`
-        )
-        .join(",")
-    : "";
-
-  const fullFilter =
-    `[0:v]${filters[1]},${subtitlesFilter ? subtitlesFilter + "," : ""}scale=${resolution}[v];[a]volume=1.0[aout]`;
-
-  // === 🧠 Commande FFMPEG ===
-  const cmd = `
-    ffmpeg ${imageInputs} -i "${audioPath}" ${bgMusicInput} \
-    -filter_complex "${fullFilter}" \
-    -map "[v]" -map "[aout]" -tune film -preset veryfast \
-    -b:v 4M -b:a 192k -shortest "${outputPath}" -y
-  `;
-
-  console.log("🧩 Exécution du rendu...");
-  await execAsync(cmd);
-
-  console.log(`✅ Vidéo générée avec succès : ${outputPath}`);
+  try { fs.unlinkSync(txtFile); } catch {}
+  if (!fs.existsSync(outputPath) || fs.statSync(outputPath).size === 0) throw new Error("Sortie video vide");
+  console.log("Video OK:", outputPath);
   return outputPath;
 }
 
-// === 🔧 PROMISIFY EXEC ===
-function execAsync(cmd) {
-  return new Promise((resolve, reject) => {
-    exec(cmd, (err, stdout, stderr) => {
-      if (err) {
-        console.error("❌ Erreur FFMPEG :", stderr);
-        reject(err);
-      } else resolve(stdout);
-    });
-  });
-}
+export default { createVideo };

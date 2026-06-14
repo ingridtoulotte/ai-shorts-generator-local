@@ -1,94 +1,107 @@
 // ===============================================
 // tts.js - AI Shorts Generator
-// TTS Manager - PlayAI + Google TTS fallback
-// Version ultra clean, top 0,1%
+// TTS: local-first (Windows SAPI), optional PlayAI/Google
 // ===============================================
 
-import fs from 'fs';
-import path from 'path';
-import axios from 'axios';
-import crypto from 'crypto';
-import { exec } from 'child_process';
-import util from 'util';
+import fs from "fs";
+import path from "path";
+import os from "os";
+import axios from "axios";
+import crypto from "crypto";
+import { execFile } from "child_process";
+import util from "util";
 
-const execAsync = util.promisify(exec);
+const execFileAsync = util.promisify(execFile);
 
-const LOG_DIR = './logs';
-const AUDIO_DIR = './audio';
-const LOG_FILE = path.join(LOG_DIR, 'tts.log');
+const LOG_DIR = "./logs";
+const AUDIO_DIR = "./audio";
+const LOG_FILE = path.join(LOG_DIR, "tts.log");
+[LOG_DIR, AUDIO_DIR].forEach((d) => { if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true }); });
 
-// Crée les dossiers si nécessaire
-[LOG_DIR, AUDIO_DIR].forEach(dir => { if (!fs.existsSync(dir)) fs.mkdirSync(dir); });
-
-// Logger proprement
 function log(message) {
-    const time = new Date().toISOString();
-    const line = `[${time}] ${message}`;
-    console.log(line);
-    fs.appendFileSync(LOG_FILE, line + '\n');
+  const line = `[${new Date().toISOString()}] ${message}`;
+  console.log(line);
+  try { fs.appendFileSync(LOG_FILE, line + "\n"); } catch {}
 }
 
-// Hash unique pour éviter les doublons
-function hashText(text) {
-    return crypto.createHash('md5').update(text).digest('hex');
+function hashText(t) { return crypto.createHash("md5").update(t).digest("hex"); }
+
+// Map UI voice codes -> installed Windows SAPI voice name substrings.
+function pickSapiVoice(voice) {
+  const v = String(voice || "fr").toLowerCase();
+  if (v.startsWith("fr")) return v.includes("female") || v.includes("femme") ? "Hortense" : "Paul";
+  if (v.startsWith("en")) return "Zira";
+  if (v.startsWith("es")) return "Helena"; // may be absent -> default used
+  return "Paul";
+}
+
+// Windows SAPI -> WAV. Fully local, no network, no API key.
+async function sapiTTS(text, outWav, voice) {
+  const wanted = pickSapiVoice(voice);
+  // PowerShell script: select voice if available, else default; write WAV.
+  const ps = `
+$ErrorActionPreference='Stop'
+Add-Type -AssemblyName System.Speech
+$s = New-Object System.Speech.Synthesis.SpeechSynthesizer
+try { $v = $s.GetInstalledVoices() | Where-Object { $_.VoiceInfo.Name -like '*${wanted}*' } | Select-Object -First 1; if ($v) { $s.SelectVoice($v.VoiceInfo.Name) } } catch {}
+$s.Rate = 1
+$s.SetOutputToWaveFile([System.IO.Path]::GetFullPath('${outWav.replace(/'/g, "''")}'))
+$txt = [System.IO.File]::ReadAllText([System.IO.Path]::GetFullPath('${(outWav + ".txt").replace(/'/g, "''")}'))
+$s.Speak($txt)
+$s.Dispose()
+`;
+  // Pass text via a side file to avoid quoting/escaping issues.
+  fs.writeFileSync(outWav + ".txt", text, "utf8");
+  const psFile = outWav + ".ps1";
+  fs.writeFileSync(psFile, ps, "utf8");
+  try {
+    await execFileAsync("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", psFile], { windowsHide: true });
+  } finally {
+    try { fs.unlinkSync(psFile); } catch {}
+    try { fs.unlinkSync(outWav + ".txt"); } catch {}
+  }
+  if (!fs.existsSync(outWav) || fs.statSync(outWav).size === 0) throw new Error("SAPI: WAV vide");
+  return outWav;
 }
 
 /**
- * textToSpeech - génère un TTS à partir d'un texte
- * @param {string} text - texte à convertir en audio
- * @param {Object} options
- * @param {string} options.voice - voix (ex: 'fr-FR')
- * @param {string} options.format - format audio ('mp3' ou 'wav')
- * @returns {Promise<{ filename: string }>}
+ * generateTTS - synthesize speech to an audio file.
+ * @param {string} text
+ * @param {string} [outPath] desired output path (extension may change to .wav for SAPI)
+ * @param {{voice?:string}} [options]
+ * @returns {Promise<string>} actual audio file path
  */
-export async function textToSpeech(text, options = {}) {
-    const voice = options.voice || 'fr-FR';
-    const format = options.format || 'mp3';
-    const hash = hashText(text + voice);
-    const filename = path.join(AUDIO_DIR, `${hash}.${format}`);
+export async function generateTTS(text, outPath, options = {}) {
+  if (!text || !String(text).trim()) throw new Error("Texte TTS vide");
+  const voice = options.voice || "fr";
+  const base = outPath ? outPath.replace(/\.[^.]+$/, "") : path.join(AUDIO_DIR, hashText(text + voice));
 
-    if (fs.existsSync(filename)) {
-        log(`✅ TTS existant : ${filename}`);
-        return { filename };
+  // 1) Optional PlayAI (only if key set)
+  if (process.env.PLAYAI_API_KEY) {
+    try {
+      const mp3 = base + ".mp3";
+      const r = await axios.post(
+        "https://api.play.ht/api/v2/tts/stream",
+        { text, voice },
+        { responseType: "arraybuffer", headers: { Authorization: `Bearer ${process.env.PLAYAI_API_KEY}` }, timeout: 30000 }
+      );
+      fs.writeFileSync(mp3, Buffer.from(r.data));
+      log(`PlayAI TTS -> ${mp3}`);
+      return mp3;
+    } catch (err) {
+      log(`PlayAI echoue (${err.message}) -> fallback local`);
     }
+  }
 
-    log(`🎤 Génération TTS : "${text.slice(0,50)}..." avec voix ${voice}`);
+  // 2) Local Windows SAPI
+  if (os.platform() === "win32") {
+    const wav = base + ".wav";
+    log(`SAPI TTS (voix ${voice}) -> ${wav}`);
+    await sapiTTS(text, wav, voice);
+    return wav;
+  }
 
-    // 1️⃣ Essai PlayAI
-    if (process.env.PLAYAI_API_KEY) {
-        try {
-            const response = await axios.post(
-                'https://api.playai.com/tts',
-                { text, voice },
-                { responseType: 'arraybuffer', headers: { 'Authorization': `Bearer ${process.env.PLAYAI_API_KEY}` } }
-            );
-            fs.writeFileSync(filename, Buffer.from(response.data));
-            log(`✅ PlayAI TTS généré : ${filename}`);
-            return { filename };
-        } catch (err) {
-            log(`⚠️ PlayAI échoué : ${err.message}`);
-        }
-    }
-
-    // 2️⃣ Fallback Google TTS via Python
-    const pyScript = path.join(process.cwd(), 'tts_script.py');
-    if (fs.existsSync(pyScript)) {
-        try {
-            const cmd = `python "${pyScript}" "${text.replace(/"/g, '\\"')}" "${filename}" "${voice}"`;
-            await execAsync(cmd);
-            log(`✅ Google TTS généré : ${filename}`);
-            return { filename };
-        } catch (err) {
-            log(`❌ Google TTS échoué : ${err.message}`);
-        }
-    }
-
-    throw new Error('❌ Aucun moteur TTS disponible !');
+  throw new Error("Aucun moteur TTS local disponible (plateforme non-Windows et pas de cle PlayAI)");
 }
 
-// Exemples d'utilisation
-// (décommenter pour tester)
-// (async () => {
-//     const result = await textToSpeech("Bonjour, test TTS ultra stylé !");
-//     console.log("Fichier audio généré :", result.filename);
-// })();
+export default { generateTTS };

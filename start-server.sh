@@ -36,7 +36,7 @@ fi
 
 # ---- Start Node ----
 echo "🚀 Starting Node backend..."
-node server.js
+node index.js
 EXIT_CODE=$?
 
 if [ $EXIT_CODE -ne 0 ]; then
