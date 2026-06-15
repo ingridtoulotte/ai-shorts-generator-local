@@ -30,13 +30,22 @@ async function run(args) {
   await execFileAsync(FFMPEG, args, { windowsHide: true, maxBuffer: 1024 * 1024 * 128 });
 }
 
+// True if the file has at least one audio stream (ffmpeg -i, no ffprobe needed).
+async function hasAudioStream(file) {
+  try { await execFileAsync(FFMPEG, ["-i", file], { windowsHide: true }); }
+  catch (e) { return /Stream #\d+:\d+.*: Audio:/.test(e.stderr || ""); }
+  return false;
+}
+
 /**
  * renderScene - scale/crop a generated clip to portrait, mux its audio,
- * and burn its caption cues. Output has no audio if audioPath is null.
- * @param {{videoPath:string, audioPath?:string, cues:Array<{text,start,end}>, outPath:string, tmpDir:string}} opts
+ * and burn its caption cues.
+ * - External TTS: pass audioPath to mux it (and optional caption cues).
+ * - LTX native audio: pass keepSourceAudio:true to keep the clip's own audio.
+ * @param {{videoPath:string, audioPath?:string, cues?:Array<{text,start,end}>, keepSourceAudio?:boolean, outPath:string, tmpDir:string}} opts
  * @returns {Promise<string>} outPath
  */
-export async function renderScene({ videoPath, audioPath, cues = [], outPath, tmpDir }) {
+export async function renderScene({ videoPath, audioPath, cues = [], keepSourceAudio = false, outPath, tmpDir }) {
   if (!fs.existsSync(videoPath)) throw new Error(`Video introuvable: ${videoPath}`);
   fs.mkdirSync(tmpDir, { recursive: true });
 
@@ -59,14 +68,21 @@ export async function renderScene({ videoPath, audioPath, cues = [], outPath, tm
     }
   }
 
+  const hasExtAudio = audioPath && fs.existsSync(audioPath);
+  const srcAudio = !hasExtAudio && keepSourceAudio && (await hasAudioStream(videoPath));
+  // Guarantee every clip has an audio stream so concat never fails.
+  const useSilent = !hasExtAudio && !srcAudio;
+
   const args = ["-y", "-i", videoPath];
-  if (audioPath && fs.existsSync(audioPath)) args.push("-i", audioPath);
+  if (hasExtAudio) args.push("-i", audioPath);
+  if (useSilent) args.push("-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000");
 
   args.push("-filter_complex", `[0:v]${videoFilter}[v]`);
   args.push("-map", "[v]");
-  if (audioPath && fs.existsSync(audioPath)) {
-    args.push("-map", "1:a");
-  }
+  if (hasExtAudio) args.push("-map", "1:a");        // external TTS track
+  else if (srcAudio) args.push("-map", "0:a");      // LTX native / source audio
+  else args.push("-map", "1:a");                    // silent fallback (anullsrc)
+
   args.push(
     "-r", String(config.fps),
     "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "veryfast", "-b:v", "5M",

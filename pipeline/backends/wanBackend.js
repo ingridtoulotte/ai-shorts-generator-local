@@ -77,23 +77,26 @@ export async function generateSceneVideo(adapted, opts = {}) {
   const jobId = opts.jobId || "job";
   const durationSec = Number(opts.durationSec) || 4;
   const seed = randomSeed();
+  const isCancelled = opts.isCancelled;
 
-  // 1) Establishing image via FLUX2.
-  const imgPrefix = `ai-shorts/${jobId}/scene${sceneId}_img`;
-  const imgWorkflow = buildFlux2Workflow({
-    prompt: adapted.prompt,
-    width: config.genWidth,
-    height: config.genHeight,
-    seed,
-    filenamePrefix: imgPrefix,
-  });
-  console.log(`[${jobId}] scene ${sceneId}: generation image (FLUX2)...`);
-  const imgFiles = await runWorkflow(imgWorkflow, { timeoutMs: config.comfyTimeoutMs });
-  const imageOut = imgFiles[0];
-  if (!fs.existsSync(imageOut.path)) throw new Error(`Image generee introuvable: ${imageOut.path}`);
-
-  // 2) Upload the generated image into ComfyUI's input pool for the I2V stage.
-  const uploadedName = await uploadImage(imageOut.path);
+  // 1) Starting image: a continuation frame if supplied, else a fresh FLUX2 shot.
+  let uploadedName;
+  let imageOut;
+  if (opts.startImage && fs.existsSync(opts.startImage)) {
+    console.log(`[${jobId}] scene ${sceneId}: continuation from supplied frame`);
+    uploadedName = await uploadImage(opts.startImage);
+    imageOut = { path: opts.startImage };
+  } else {
+    const imgPrefix = `ai-shorts/${jobId}/scene${sceneId}_img`;
+    const imgWorkflow = buildFlux2Workflow({
+      prompt: adapted.prompt, width: config.genWidth, height: config.genHeight, seed, filenamePrefix: imgPrefix,
+    });
+    console.log(`[${jobId}] scene ${sceneId}: generation image (FLUX2)...`);
+    const imgFiles = await runWorkflow(imgWorkflow, { timeoutMs: config.comfyTimeoutMs, isCancelled });
+    imageOut = imgFiles[0];
+    if (!fs.existsSync(imageOut.path)) throw new Error(`Image generee introuvable: ${imageOut.path}`);
+    uploadedName = await uploadImage(imageOut.path);
+  }
 
   // 3) Motion video via Wan2.2 I2V camera.
   const frames = durationToFrames(durationSec, config.fps);
@@ -111,7 +114,7 @@ export async function generateSceneVideo(adapted, opts = {}) {
     filenamePrefix: vidPrefix,
   });
   console.log(`[${jobId}] scene ${sceneId}: generation video (Wan2.2, ${frames} frames, camera=${adapted.camera})...`);
-  const vidFiles = await runWorkflow(vidWorkflow, { timeoutMs: config.comfyTimeoutMs });
+  const vidFiles = await runWorkflow(vidWorkflow, { timeoutMs: config.comfyTimeoutMs, isCancelled });
   const videoOut = vidFiles.find((f) => f.filename.endsWith(".mp4")) || vidFiles[0];
   if (!fs.existsSync(videoOut.path)) throw new Error(`Video generee introuvable: ${videoOut.path}`);
 

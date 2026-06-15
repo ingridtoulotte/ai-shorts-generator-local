@@ -12,6 +12,32 @@ import { config, comfyInputDir, comfyOutputDir } from "./config.js";
 
 const CLIENT_ID = "ai-shorts-" + crypto.randomBytes(4).toString("hex");
 
+// Thrown when a job is cancelled mid-flight (so callers can skip retries).
+export class CancelledError extends Error {
+  constructor(msg = "cancelled") { super(msg); this.name = "CancelledError"; this.cancelled = true; }
+}
+
+/** interrupt - stop ComfyUI's currently executing prompt. */
+export async function interrupt() {
+  try { await axios.post(`${config.comfyUrl}/interrupt`, {}, { timeout: 8000 }); } catch {}
+}
+
+/** clearPending - drop all queued (not-yet-running) ComfyUI prompts. */
+export async function clearPending() {
+  try { await axios.post(`${config.comfyUrl}/queue`, { clear: true }, { timeout: 8000 }); } catch {}
+}
+
+/** freeMemory - ask ComfyUI to unload models and free VRAM. */
+export async function freeMemory() {
+  try { await axios.post(`${config.comfyUrl}/free`, { unload_models: true, free_memory: true }, { timeout: 15000 }); } catch {}
+}
+
+/** systemStats - VRAM/GPU snapshot from ComfyUI (for the monitor UI). */
+export async function systemStats() {
+  const res = await axios.get(`${config.comfyUrl}/system_stats`, { timeout: 8000 });
+  return res.data;
+}
+
 /**
  * queuePrompt - submit a workflow (API JSON format) to ComfyUI.
  * @param {object} workflow - node graph in /prompt API format
@@ -42,6 +68,10 @@ export async function waitForCompletion(promptId, opts = {}) {
   const deadline = Date.now() + timeoutMs;
 
   while (Date.now() < deadline) {
+    if (opts.isCancelled && opts.isCancelled()) {
+      await interrupt();
+      throw new CancelledError(`ComfyUI job ${promptId} annule`);
+    }
     const res = await axios.get(`${config.comfyUrl}/history/${promptId}`, { timeout: 15000 });
     const entry = res.data?.[promptId];
     if (entry) {
@@ -122,6 +152,7 @@ export async function runWorkflow(workflow, opts = {}) {
       if (!files.length) throw new Error(`ComfyUI job ${promptId}: aucun fichier de sortie`);
       return files.map((f) => ({ ...f, path: resolveLocalPath(f) }));
     } catch (err) {
+      if (err.cancelled) throw err; // never retry a cancellation
       lastErr = err;
       if (attempt < retries) {
         console.warn(`ComfyUI workflow echoue (tentative ${attempt + 1}/${retries + 1}): ${err.message.split("\n")[0]} -> nouvelle tentative`);
@@ -132,4 +163,4 @@ export async function runWorkflow(workflow, opts = {}) {
   throw lastErr;
 }
 
-export default { queuePrompt, waitForCompletion, extractOutputFiles, resolveLocalPath, uploadImage, runWorkflow };
+export default { queuePrompt, waitForCompletion, extractOutputFiles, resolveLocalPath, uploadImage, runWorkflow, interrupt, clearPending, freeMemory, systemStats, CancelledError };

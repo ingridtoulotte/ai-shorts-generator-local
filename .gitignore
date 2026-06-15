@@ -11,6 +11,7 @@ uploads/
 output/
 logs/
 tmp/
+queue.json
 __pycache__/
 *.pyc
 *.wav
