@@ -10,9 +10,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { v4 as uuidv4 } from "uuid";
 
-import { generateScript } from "./groq.js";
-import { generateTTS } from "./tts.js";
-import { createVideo } from "./video.js";
+import { runPipeline } from "./pipeline/orchestrator.js";
 
 dotenv.config();
 
@@ -45,25 +43,18 @@ app.get("/api/voices", (req, res) => {
   ]);
 });
 
-// Main pipeline.
+// Main pipeline: idea -> script -> scenes -> prompts -> local generation -> render.
 app.post("/generate", async (req, res) => {
   const idea = (req.body?.idea ?? req.body?.prompt ?? "").toString().trim();
   const voice = (req.body?.voice ?? "fr").toString();
-  const durationSec = Number(req.body?.duration) || 20;
+  const durationSec = Number(req.body?.duration) || 30;
+  const style = req.body?.style ? String(req.body.style) : undefined;
 
   if (!idea) return res.status(400).json({ error: "Pas de texte fourni" });
 
   const id = uuidv4();
   try {
-    console.log(`[${id}] Script...`);
-    const script = await generateScript(idea, { durationSec });
-
-    console.log(`[${id}] TTS...`);
-    const audioPath = await generateTTS(script, path.join(process.cwd(), "audio", id), { voice });
-
-    console.log(`[${id}] Video...`);
-    const videoPath = await createVideo({ audioPath, text: script, outputName: `${id}.mp4` });
-
+    const { videoPath, script } = await runPipeline(idea, { durationSec, voice, style, jobId: id });
     const videoUrl = `/output/${path.basename(videoPath)}`;
     console.log(`[${id}] Done -> ${videoUrl}`);
     res.json({ videoUrl, url: videoUrl, script });

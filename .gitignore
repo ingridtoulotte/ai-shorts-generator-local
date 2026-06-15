@@ -10,9 +10,11 @@ tts/tts-env/
 uploads/
 output/
 logs/
+tmp/
 __pycache__/
 *.pyc
 *.wav
+*.fit.mp4
 .DS_Store
 
 # Codespaces
