@@ -16,6 +16,8 @@ import { config } from "./config.js";
 import { adaptScenePrompt } from "./promptAdapter.js";
 import { getBackend } from "./backends/index.js";
 import { renderScene, concatScenes, fitToDuration } from "./render.js";
+import { upscaleImage, upscaleVideo } from "./upscale.js";
+import { analyzeLoudness, applyAcousticMatch } from "./acoustic.js";
 import { CancelledError } from "./comfyClient.js";
 
 const execFileAsync = util.promisify(execFile);
@@ -33,12 +35,10 @@ export async function extractLastFrame(videoPath, outPng) {
   return outPng;
 }
 
-// 2x spatial upscale (lanczos) of an image.
+// 2x spatial upscale of a carried frame. Real-ESRGAN when available (sharper
+// continuity seed), ffmpeg lanczos fallback otherwise.
 export async function upscale2x(inPng, outPng) {
-  await execFileAsync(FFMPEG, ["-y", "-i", inPng, "-vf", "scale=iw*2:ih*2:flags=lanczos", outPng],
-    { windowsHide: true, maxBuffer: 1024 * 1024 * 64 });
-  if (!fs.existsSync(outPng)) throw new Error(`Upscale 2x echoue: ${inPng}`);
-  return outPng;
+  return upscaleImage(inPng, outPng, { scale: 2 });
 }
 
 // Optional: motion-interpolate to smooth segment seams (slow; off by default).
@@ -78,6 +78,16 @@ export async function continueVideo(opts = {}) {
 
   const backend = getBackend();
   const native = nativeAudioOn();
+
+  // Acoustic match: measure the seed clip's loudness once so every new segment
+  // can be retargeted to the same profile (only meaningful with real audio).
+  const acousticMatch = opts.acousticMatch !== false;
+  let seedProfile = null;
+  if (acousticMatch && native && opts.seedVideoPath && fs.existsSync(opts.seedVideoPath)) {
+    onProgress({ stage: "acoustic", pct: 2 });
+    seedProfile = await analyzeLoudness(opts.seedVideoPath);
+  }
+
   const clips = [];
   const continuityTags = [];
   let totalDur = 0;
@@ -102,6 +112,14 @@ export async function continueVideo(opts = {}) {
 
     const outScene = path.join(tmp, `seg_${String(s + 1).padStart(2, "0")}.mp4`);
     await renderScene({ videoPath, audioPath: null, cues: [], keepSourceAudio: native, outPath: outScene, tmpDir: tmp });
+
+    // Retarget this segment's audio to the seed's loudness profile.
+    if (seedProfile) {
+      const matched = path.join(tmp, `seg_${String(s + 1).padStart(2, "0")}_am.mp4`);
+      const r = await applyAcousticMatch(outScene, matched, seedProfile);
+      if (r.matched) fs.renameSync(matched, outScene);
+    }
+
     clips.push(outScene);
     totalDur += segDurationSec;
 
@@ -117,10 +135,19 @@ export async function continueVideo(opts = {}) {
   await concatScenes(all, finalPath);
 
   if (opts.smooth) {
-    onProgress({ stage: "smooth", pct: 97 });
+    onProgress({ stage: "smooth", pct: 96 });
     const sm = finalPath.replace(/\.mp4$/i, "") + ".smooth.mp4";
     await interpolate(finalPath, sm, config.fps);
     fs.renameSync(sm, finalPath);
+  }
+
+  // Optional Real-ESRGAN upscale of the stitched continuation (off / 2x / 4x).
+  const upscale = Number(opts.upscale) || 0;
+  if (upscale >= 2) {
+    guard();
+    const upPath = finalPath.replace(/\.mp4$/i, `.up${upscale}.mp4`);
+    await upscaleVideo(finalPath, upPath, { scale: upscale, fps: config.fps, isCancelled, onProgress });
+    fs.renameSync(upPath, finalPath);
   }
 
   onProgress({ stage: "done", pct: 100 });

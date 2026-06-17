@@ -3,6 +3,7 @@
 // ===============================================
 
 import path from "path";
+import os from "os";
 
 function num(name, def) {
   const v = process.env[name];
@@ -45,6 +46,21 @@ export const config = {
   audioDir: path.join(process.cwd(), "audio"),
   logsDir: path.join(process.cwd(), "logs"),
   tmpDir: path.join(process.cwd(), "tmp"),
+
+  // --- Real-ESRGAN upscaling (final-output + continuation carried frame) ---
+  // Uses the realesrgan-ncnn-vulkan binary; the Upscayl build is auto-detected.
+  // Override with REALESRGAN_BIN / REALESRGAN_MODELS / REALESRGAN_MODEL.
+  // Missing binary/model -> pipeline silently falls back to ffmpeg lanczos.
+  upscale: {
+    bin: process.env.REALESRGAN_BIN ||
+      (os.platform() === "win32"
+        ? "C:\\Program Files\\Upscayl\\resources\\bin\\upscayl-bin.exe"
+        : "realesrgan-ncnn-vulkan"),
+    modelDir: process.env.REALESRGAN_MODELS ||
+      (os.platform() === "win32" ? "C:\\Program Files\\Upscayl\\resources\\models" : "models"),
+    model: process.env.REALESRGAN_MODEL || "upscayl-standard-4x",
+    gpuId: process.env.REALESRGAN_GPU != null ? Number(process.env.REALESRGAN_GPU) : null,
+  },
 
   // --- Robustness ---
   comfyTimeoutMs: num("COMFY_TIMEOUT_MS", 600000), // 10 min per generation job

@@ -20,6 +20,8 @@ import { generateTTS } from "../tts.js";
 import { wavDurationSec } from "./audioUtils.js";
 import { buildSceneCues } from "./captions.js";
 import { renderScene, concatScenes, fitToDuration } from "./render.js";
+import { upscaleVideo } from "./upscale.js";
+import { resolveAudioMode } from "./audioModes.js";
 import { CancelledError } from "./comfyClient.js";
 
 function ensureDirs(jobId) {
@@ -30,16 +32,6 @@ function ensureDirs(jobId) {
   };
   for (const d of [dirs.audio, dirs.tmp, dirs.output]) fs.mkdirSync(d, { recursive: true });
   return dirs;
-}
-
-// Audio mode -> whether THIS scene carries spoken narration.
-//   A = narrated intro (scene 1 only)   B = SFX/ambience only (never speak)
-//   C = narration + ambience (always)   D = auto (treated as C)
-function shouldSpeak(mode, sceneIdx) {
-  const m = String(mode || "C").toUpperCase();
-  if (m === "B") return false;
-  if (m === "A") return sceneIdx === 0;
-  return true; // C, D
 }
 
 function deriveAmbience(adapted, scene) {
@@ -63,7 +55,7 @@ export async function runPipeline(idea, opts = {}) {
   const durationSec = Number(opts.durationSec) || 30;
   const voice = opts.voice || "fr";
   const style = opts.style;
-  const audioMode = opts.audioMode || "C";
+  const audioMode = resolveAudioMode(opts.audioMode);
   const isCancelled = opts.isCancelled || (() => false);
   const onProgress = opts.onProgress || (() => {});
   const dirs = ensureDirs(jobId);
@@ -104,17 +96,21 @@ export async function runPipeline(idea, opts = {}) {
     const adapted = await adaptScenePrompt(scene, { idea, script: script.script, durationSec, style, continuityTags });
     for (const t of adapted.continuity_tags || []) if (!continuityTags.includes(t)) continuityTags.push(t);
 
-    const speak = nativeAudio ? shouldSpeak(audioMode, i) : true;
+    const speak = audioMode.speak;
+    const wantAmbience = audioMode.ambience;
 
     let audioPath = null;
     let sceneDuration;
     if (nativeAudio) {
-      // Round to match the integer-second length LTX renders, so the fit is correct.
+      // LTX renders its own audio -> round to the integer-second length so the fit is correct.
       sceneDuration = Math.max(1, Math.round(Number(scene.duration_sec) || 4));
-    } else {
+    } else if (speak) {
       console.log(`[${jobId}] 4/6 Scene ${sceneId}/${scenes.length}: synthese audio...`);
       audioPath = await generateTTS(scene.narration, path.join(dirs.audio, `scene${sceneId}`), { voice });
       sceneDuration = audioPath.endsWith(".wav") ? wavDurationSec(audioPath) : Number(scene.duration_sec) || 4;
+    } else {
+      // SFX-only on the TTS engine: no narration track -> silent scene (render adds silence).
+      sceneDuration = Math.max(1, Math.round(Number(scene.duration_sec) || 4));
     }
     totalAudioSec += sceneDuration;
 
@@ -123,25 +119,35 @@ export async function runPipeline(idea, opts = {}) {
     const { videoPath } = await backend.generateSceneVideo(adapted, {
       durationSec: sceneDuration,
       narration: speak ? scene.narration : "",
-      ambience: deriveAmbience(adapted, scene),
+      ambience: wantAmbience ? deriveAmbience(adapted, scene) : "",
       startImage: i === 0 && opts.startImage ? opts.startImage : null,
       jobId,
       isCancelled,
     });
 
-    // No subtitles in the LTX variant; captions only when using external TTS.
-    const cues = nativeAudio ? [] : buildSceneCues(scene.narration, sceneDuration);
+    // Captions follow spoken narration only (no subtitles for native-audio or SFX-only).
+    const cues = (!nativeAudio && speak) ? buildSceneCues(scene.narration, sceneDuration) : [];
     const scenePath = path.join(dirs.tmp, `scene${sceneId}.mp4`);
     await renderScene({ videoPath, audioPath, cues, keepSourceAudio: nativeAudio, outPath: scenePath, tmpDir: dirs.tmp });
     clips.push(scenePath);
   }
 
   guard();
-  onProgress({ stage: "assemble", pct: 92 });
+  onProgress({ stage: "assemble", pct: 90 });
   console.log(`[${jobId}] 6/6 Assemblage final...`);
   const finalPath = path.join(dirs.output, `${jobId}.mp4`);
   await concatScenes(clips, finalPath);
   await fitToDuration(finalPath, totalAudioSec, durationSec);
+
+  // Optional Real-ESRGAN upscale of the finished short (off / 2x / 4x).
+  const upscale = Number(opts.upscale) || 0;
+  if (upscale >= 2) {
+    guard();
+    console.log(`[${jobId}] Upscale ${upscale}x...`);
+    const upPath = finalPath.replace(/\.mp4$/i, `.up${upscale}.mp4`);
+    await upscaleVideo(finalPath, upPath, { scale: upscale, fps: config.fps, isCancelled, onProgress });
+    fs.renameSync(upPath, finalPath);
+  }
 
   onProgress({ stage: "done", pct: 100 });
   console.log(`[${jobId}] Termine -> ${finalPath}`);

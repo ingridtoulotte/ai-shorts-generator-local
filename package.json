@@ -1,14 +1,17 @@
 {
-  "name": "ai-video-generator",
-  "version": "4.0.0",
-  "description": "AI Shorts Generator — création automatisée de vidéos courtes avec Groq, Whisper et PlayHT API (via axios).",
+  "name": "ai-shorts-generator-local",
+  "version": "5.0.0",
+  "description": "AI Shorts Studio — a fully-local text-to-video studio (Wan 2.2). Ollama + ComfyUI + ffmpeg, no API keys. Queue, continuation, Real-ESRGAN upscale, acoustic match, TypeScript UI.",
   "type": "module",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
     "dev": "nodemon index.js",
+    "ui:dev": "vite",
+    "typecheck": "tsc -p frontend/tsconfig.json --noEmit",
+    "build": "vite build",
     "render": "bash ./start-server.sh",
-    "test": "node test/smoke.js"
+    "test": "node test/queue_test.mjs"
   },
   "engines": {
     "node": ">=20.0.0",
@@ -37,8 +40,10 @@
     "winston": "^3.14.2"
   },
   "devDependencies": {
+    "eslint": "^9.11.1",
     "nodemon": "^3.1.0",
-    "eslint": "^9.11.1"
+    "typescript": "^5.9.3",
+    "vite": "^5.4.21"
   },
   "keywords": [
     "AI",
@@ -52,10 +57,10 @@
     "whisper",
     "tts"
   ],
-  "author": "theot44240-tech",
+  "author": "ingridtoulotte",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/theot44240-tech/Ai-video-generator"
+    "url": "https://github.com/ingridtoulotte/ai-shorts-generator-local"
   }
 }

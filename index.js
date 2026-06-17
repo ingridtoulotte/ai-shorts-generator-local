@@ -13,6 +13,8 @@ import { fileURLToPath } from "url";
 import { queue } from "./pipeline/jobqueue.js";
 import { systemStats } from "./pipeline/comfyClient.js";
 import { config } from "./pipeline/config.js";
+import { realesrganAvailable, upscalerLabel, estimateUpscale } from "./pipeline/upscale.js";
+import { AUDIO_MODES } from "./pipeline/audioModes.js";
 
 dotenv.config();
 
@@ -28,11 +30,33 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(express.json({ limit: "2mb" }));
-app.use(express.static(path.join(__dirname, "public")));
+// Serve the built TypeScript UI (dist/) when present; fall back to the
+// no-build static UI (public/) otherwise. `npm run build` produces dist/.
+const distDir = path.join(__dirname, "dist");
+const uiDir = fs.existsSync(path.join(distDir, "index.html")) ? distDir : path.join(__dirname, "public");
+app.use(express.static(uiDir));
 app.use("/output", express.static(config.outputDir));
 
 // ---- meta ----
 app.get("/api/health", (req, res) => res.json({ ok: true, engine: config.engine, time: new Date().toISOString() }));
+
+// Capabilities the UI needs to render upscale + audio controls accurately.
+app.get("/api/capabilities", (req, res) => res.json({
+  engine: config.engine,
+  nativeAudio: Boolean(config.ltx?.nativeAudio) && config.engine === "ltx",
+  upscaler: { label: upscalerLabel(), realesrgan: realesrganAvailable(), scales: [2, 4] },
+  audioModes: AUDIO_MODES,
+  resolution: { width: config.outWidth, height: config.outHeight },
+}));
+
+// Estimate output resolution / VRAM / time for an upscale choice (UI preview).
+app.get("/api/upscale-estimate", (req, res) => {
+  const scale = Number(req.query.scale) || 2;
+  const width = Number(req.query.width) || config.outWidth;
+  const height = Number(req.query.height) || config.outHeight;
+  const frames = Number(req.query.frames) || 0;
+  res.json(estimateUpscale({ width, height, scale, frames, fps: config.fps }));
+});
 app.get("/api/voices", (req, res) => res.json([
   { id: "fr", label: "Francais" }, { id: "en", label: "English" }, { id: "es", label: "Espanol" },
 ]));
@@ -65,6 +89,7 @@ app.post("/generate", (req, res) => {
     voice: (req.body?.voice ?? "fr").toString(),
     durationSec: Number(req.body?.duration) || 30,
     audioMode: (req.body?.audioMode ?? "C").toString(),
+    upscale: [2, 4].includes(Number(req.body?.upscale)) ? Number(req.body.upscale) : 0,
     style: req.body?.style ? String(req.body.style) : undefined,
   };
   const job = queue.add({ type: "generate", params, label: idea, priority: Number(req.body?.priority) || 0 });
@@ -82,6 +107,8 @@ app.post("/continue", (req, res) => {
     segments: Number(req.body?.segments) || 1,
     segDurationSec: Number(req.body?.segDurationSec) || 5,
     smooth: Boolean(req.body?.smooth),
+    upscale: [2, 4].includes(Number(req.body?.upscale)) ? Number(req.body.upscale) : 0,
+    acousticMatch: req.body?.acousticMatch !== false,
     prependSeed: req.body?.prependSeed !== false,
   };
   const job = queue.add({ type: "continue", params, label: `+${params.segments} seg · ${params.idea}`, priority: Number(req.body?.priority) || 0 });

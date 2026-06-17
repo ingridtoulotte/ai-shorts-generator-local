@@ -1,0 +1,30 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-test:
+    # Windows runner: SAPI voice-over + PowerShell are required by the pipeline.
+    runs-on: windows-latest
+    env:
+      GEN_ENGINE: stub
+      OLLAMA_URL: http://127.0.0.1:1   # unreachable -> deterministic offline script fallback
+      STUB_DELAY_MS: "30"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install
+        run: npm install
+      - name: Type-check (strict TS)
+        run: npm run typecheck
+      - name: Build UI
+        run: npm run build
+      - name: Pipeline smoke (stub)
+        run: node test/batch_test.mjs
+      - name: Queue / cancel / continuation (stub)
+        run: node test/queue_test.mjs
